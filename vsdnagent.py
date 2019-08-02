@@ -107,7 +107,8 @@ def del_bridge(ovsdb, label):
     else:
         raise ValueError("the virtual instance <{i}> is not exist".format(i=label))
 
-#TODO Change the try catch to check_ovs_service
+
+# TODO Change the try catch to check_ovs_service
 def add_vport(ovsdb, instance, portnum=None):
     port = "V{i}".format(i=str(uuid.uuid4())[:8])
     peer = "R{i}".format(i=str(uuid.uuid4())[:8])
@@ -151,7 +152,6 @@ def add_vport(ovsdb, instance, portnum=None):
 
 
 def del_vport(ovsdb, instance, portnum):
-
     port, peer = get_port(ovsdb, instance, portnum)
     transport = os.environ['ORCH_TRANS_BRIDGE']
 
