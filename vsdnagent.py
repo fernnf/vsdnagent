@@ -45,13 +45,28 @@ def set_ovsdb_attr(ovsdb, table, record, column, value, key=None):
 
 
 def get_dpid(ovsdb, bridge):
-    return get_ovsdb_attr(ovsdb, "Bridge", bridge, "datapath_id")[0]
+    return get_ovsdb_attr(ovsdb, "Bridge", bridge, "datapath_id")[0][0]
 
 
 def set_dpid(ovsdb, bridge, dpid):
     ret = set_ovsdb_attr(ovsdb, "Bridge", bridge, "other_config", dpid, "datapath-id")
     if ret is not None:
         raise ValueError(str(ret))
+
+
+def get_port(ovsdb, bridge, portnum):
+    ports = run_command(ovsdb, 'list-ports', [bridge])
+    if len(ports) == 0:
+        raise ValueError("there is no ports on virtual bridge <{b}> ".format(b=bridge))
+    for port in ports:
+        pn = get_ovsdb_attr(ovsdb, 'Interface', port, "ofport")[0][0]
+        if pn == int(portnum):
+            type = get_ovsdb_attr(ovsdb, 'Interface', port, "type")[0][0]
+            if type == 'patch':
+                peer = get_ovsdb_attr(ovsdb, 'Interface', port, "options")[0]['peer']
+                return port, peer
+            return port, None
+    return None, None
 
 
 def set_bridge(ovsdb, label, datapath_id=None, protocols=None):
@@ -92,10 +107,11 @@ def del_bridge(ovsdb, label):
     else:
         raise ValueError("the virtual instance <{i}> is not exist".format(i=label))
 
-
-def add_vport(ovsdb, transport, instance, portnum=None):
+#TODO Change the try catch to check_ovs_service
+def add_vport(ovsdb, instance, portnum=None):
     port = "V{i}".format(i=str(uuid.uuid4())[:8])
     peer = "R{i}".format(i=str(uuid.uuid4())[:8])
+    transport = os.environ['ORCH_TRANS_BRIDGE']
 
     def create(b, p):
         if bridge_exist(ovsdb, b):
@@ -135,8 +151,26 @@ def add_vport(ovsdb, transport, instance, portnum=None):
 
 
 def del_vport(ovsdb, instance, portnum):
-    pass
 
+    port, peer = get_port(ovsdb, instance, portnum)
+    transport = os.environ['ORCH_TRANS_BRIDGE']
+
+    def remove_port(b, p):
+        r = run_command(ovsdb, 'del-port', [b, p])
+        if r is not None:
+            raise ValueError(str(r))
+
+    try:
+        if port is not None:
+            remove_port(instance, port)
+            if peer is not None:
+                remove_port(transport, peer)
+
+            return False, None
+        else:
+            raise ValueError("the port <{p}> is not attached to instance <{i}>".format(p=port, i=instance))
+    except Exception as ex:
+        pass
     """
     def remove():
         if bridge_exist(ovsdb, instance):
