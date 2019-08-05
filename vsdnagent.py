@@ -100,16 +100,18 @@ def set_bridge(ovsdb, label, datapath_id=None, protocols=None):
 
 
 def del_bridge(ovsdb, label):
-    if bridge_exist(ovsdb, label):
-        ret = run_command(ovsdb, 'del-br', [label])
-        if ret is not None:
-            raise ValueError(str(ret))
+    if check_ovs_service():
+        if bridge_exist(ovsdb, label):
+            ret = run_command(ovsdb, 'del-br', [label])
+            if ret is not None:
+                raise ValueError(str(ret))
+        else:
+            raise ValueError("the virtual instance <{i}> is not exist".format(i=label))
     else:
-        raise ValueError("the virtual instance <{i}> is not exist".format(i=label))
-
+        raise ValueError("the ovsdb service is not available")
 
 # TODO Change the try catch to check_ovs_service
-def add_vport(ovsdb, instance, portnum=None):
+def add_vport(ovsdb, label, portnum=None):
     port = "V{i}".format(i=str(uuid.uuid4())[:8])
     peer = "R{i}".format(i=str(uuid.uuid4())[:8])
     transport = os.environ['ORCH_TRANS_BRIDGE']
@@ -129,8 +131,8 @@ def add_vport(ovsdb, instance, portnum=None):
         else:
             raise ValueError(str(r))
 
-    def config_portnum_instance():
-        ret = set_ovsdb_attr(ovsdb, "Interface", port, "ofport_request", portnum)
+    def config_portnum_instance(p):
+        ret = set_ovsdb_attr(ovsdb, "Interface", p, "ofport_request", portnum)
         if ret is not None:
             raise ValueError(str(ret))
 
@@ -139,20 +141,22 @@ def add_vport(ovsdb, instance, portnum=None):
         p2 = get_ovsdb_attr(ovsdb, "Interface", peer, "ofport")[0]
         return p1, p2
 
-    try:
-        create(instance, port)
+
+    if check_ovs_service():
+        create(label, port)
         create(transport, peer)
         config_vport(port, peer)
         config_vport(peer, port)
         if portnum is not None:
-            config_portnum_instance()
-        return False, get_portnum()
-    except Exception as ex:
-        return True, str(ex)
+            config_portnum_instance(port)
+
+        return get_portnum()
+    else:
+        raise ValueError("the ovsdb service is not available")
 
 
-def del_vport(ovsdb, instance, portnum):
-    port, peer = get_port(ovsdb, instance, portnum)
+def del_vport(ovsdb, label, portnum):
+    port, peer = get_port(ovsdb, label, portnum)
     transport = os.environ['ORCH_TRANS_BRIDGE']
 
     def remove_port(b, p):
@@ -160,21 +164,17 @@ def del_vport(ovsdb, instance, portnum):
         if r is not None:
             raise ValueError(str(r))
 
-    try:
+
+    if check_ovs_service():
         if port is not None:
-            remove_port(instance, port)
+            remove_port(label, port)
             if peer is not None:
                 remove_port(transport, peer)
-
-            return False, None
         else:
-            raise ValueError("the port <{p}> is not attached to instance <{i}>".format(p=port, i=instance))
-    except Exception as ex:
-        pass
-    """
-    def remove():
-        if bridge_exist(ovsdb, instance):
-    """
+            raise ValueError("the port <{p}> is not attached to instance <{i}>".format(p=port, i=label))
+    else:
+        raise ValueError("the ovsdb service is not available")
+
 
 
 PROTO = ofproto_v1_3
@@ -221,6 +221,48 @@ def send_mod(dp, out_port, match, inst, cmd):
 
     return dp.send_msg(req)
 
+def rule_link_port(dp, in_port, out_port, vlan_id, cmd):
+    mod_cmd = cmd_supported.get(cmd, None)
+
+    if mod_cmd is None:
+        raise ValueError("command not found")
+
+    def rule_ingress():
+        actions = [
+            PARSER.OFPActionPopVlan(),
+            PARSER.OFPActionOutput(port=int(out_port))
+        ]
+        instructions = [
+            PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, actions)
+        ]
+        match = PARSER.OFPMatch(in_port=int(in_port), vlan_vid=(int(vlan_id) + 0x1000))
+
+        return send_mod(dp, int(out_port), match, instructions, mod_cmd)
+
+    def rule_egress():
+        ethertype = 33024
+
+        actions = [
+
+            PARSER.OFPActionPushVlan(ethertype),
+            PARSER.OFPActionSetField(vlan_vid=(int(vlan_id) + 0x1000)),
+            PARSER.OFPActionOutput(port=int(in_port))
+
+        ]
+        instructions = [
+            PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, actions)
+        ]
+
+        match =  PARSER.OFPMatch(in_port=int(out_port))
+
+        return send_mod(dp, int(in_port), match, instructions, mod_cmd)
+
+
+    if dp.is_active():
+        if rule_ingress():
+            return rule_egress()
+    else:
+        raise ValueError("the switch is not available")
 
 class VSDNAgentService(ApplicationSession):
     def __int__(self, *args, **kwargs):
@@ -243,6 +285,15 @@ class VSDNAgentService(ApplicationSession):
             return False, None
         except Exception as ex:
             return True, str(ex)
+
+    @wamp.register(uri = "{p}.create_vport")
+    def create_vport(self, label, portnum, realport, vlan_id ):
+        try:
+            _ , port2 = add_vport(self._ovsdb, label, portnum)
+            rule_link_port(self._opflw, realport, port2, vlan_id, 'add')
+        except
+            return
+
 
 
 class VSDNAgentController(RyuApp):
