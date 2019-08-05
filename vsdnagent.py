@@ -40,6 +40,7 @@ def set_ovsdb_attr(ovsdb, table, record, column, value, key=None):
         column = "{c}:{k}".format(c=column, k=key)
 
     ret = run_command(ovsdb, "set", [table, record, "{c}={v}".format(c=column, v=value)])
+    print(ret)
     if ret is not None:
         raise ValueError(str(ret))
 
@@ -55,18 +56,51 @@ def set_dpid(ovsdb, bridge, dpid):
 
 
 def get_port(ovsdb, bridge, portnum):
+    assert check_ovs_service(), "the ovsdb service is not available"
     ports = run_command(ovsdb, 'list-ports', [bridge])
     if len(ports) == 0:
         raise ValueError("there is no ports on virtual bridge <{b}> ".format(b=bridge))
     for port in ports:
         pn = get_ovsdb_attr(ovsdb, 'Interface', port, "ofport")[0][0]
         if pn == int(portnum):
-            type = get_ovsdb_attr(ovsdb, 'Interface', port, "type")[0][0]
+            type = get_ovsdb_attr(ovsdb, 'Interface', port, "type")[0]
             if type == 'patch':
                 peer = get_ovsdb_attr(ovsdb, 'Interface', port, "options")[0]['peer']
                 return port, peer
             return port, None
     return None, None
+
+
+def get_peer_portnum(ovsdb, bridge, portnum):
+    assert check_ovs_service(), "the ovsdb service is not available"
+    ports = run_command(ovsdb, 'list-ports', [bridge])
+    if len(ports) == 0:
+        raise ValueError("there is no ports on virtual bridge <{b}> ".format(b=bridge))
+    for port in ports:
+        pn = get_ovsdb_attr(ovsdb, 'Interface', port, "ofport")[0][0]
+        if pn == int(portnum):
+            peer = get_ovsdb_attr(ovsdb, 'Interface', port, "options")[0]['peer']
+            pn_peer = get_ovsdb_attr(ovsdb, 'Interface', peer, "ofport")[0][0]
+            return pn_peer
+
+    return None
+
+
+def set_controller(ovsdb, bridge, controller):
+    assert check_ovs_service(), "the ovsdb service is not available"
+    assert isinstance(controller, list), "the controller value must be a list"
+    assert len(controller), "One controller must be "
+
+    ctl = ",".join(controller)
+    ret = run_command(ovsdb, 'set-controller', [bridge, controller])
+    if ret is not None:
+        raise ValueError(str(ret))
+
+def del_controller(ovsdb, bridge):
+    assert check_ovs_service(), "the ovsdb service is not available"
+    ret = run_command(ovsdb, 'del-controller', [bridge])
+    if ret is not None:
+        raise ValueError(str(ret))
 
 
 def set_bridge(ovsdb, label, datapath_id=None, protocols=None):
@@ -76,7 +110,7 @@ def set_bridge(ovsdb, label, datapath_id=None, protocols=None):
             if ret is not None:
                 raise ValueError(str(ret))
         else:
-            raise ValueError("A virtual instance <{i}> with name already exists on node".format(i=label))
+            raise ValueError("A virtual instance <{i}> with name already exists on device".format(i=label))
 
     def config():
         if datapath_id is not None:
@@ -110,8 +144,9 @@ def del_bridge(ovsdb, label):
     else:
         raise ValueError("the ovsdb service is not available")
 
+
 # TODO Change the try catch to check_ovs_service
-def add_vport(ovsdb, label, portnum=None):
+def add_vport(ovsdb, label, portnum=None, realport=None, vlan_id=None):
     port = "V{i}".format(i=str(uuid.uuid4())[:8])
     peer = "R{i}".format(i=str(uuid.uuid4())[:8])
     transport = os.environ['ORCH_TRANS_BRIDGE']
@@ -122,14 +157,24 @@ def add_vport(ovsdb, label, portnum=None):
             if ret is not None:
                 raise ValueError(str(ret))
 
-    def config_vport(v, p):
-        r = set_ovsdb_attr(ovsdb, "Interface", v, "type", "patch")
-        if r is None:
-            s = set_ovsdb_attr(ovsdb, "Interface", v, "options", p, "peer")
-            if s is not None:
-                raise ValueError(str(s))
+    def config_vport(v, p, r=None, vl=None):
+        ph = set_ovsdb_attr(ovsdb, "Interface", v, "type", "patch")
+        if ph is None:
+            pr = set_ovsdb_attr(ovsdb, "Interface", v, "options", p, "peer")
+            if pr is not None:
+                raise ValueError(str(pr))
         else:
             raise ValueError(str(r))
+
+        if r is not None:
+            t = set_ovsdb_attr(ovsdb, "Interface", v, "external_ids", int(r), "realport")
+            if t is not None:
+                raise ValueError(str(pr))
+
+        if vl is not None:
+            u = set_ovsdb_attr(ovsdb, "Interface", v, "external_ids", int(vl), "vlan_id")
+            if u is not None:
+                raise ValueError(str(pr))
 
     def config_portnum_instance(p):
         ret = set_ovsdb_attr(ovsdb, "Interface", p, "ofport_request", portnum)
@@ -137,16 +182,15 @@ def add_vport(ovsdb, label, portnum=None):
             raise ValueError(str(ret))
 
     def get_portnum():
-        p1 = get_ovsdb_attr(ovsdb, "Interface", port, "ofport")[0]
-        p2 = get_ovsdb_attr(ovsdb, "Interface", peer, "ofport")[0]
+        p1 = get_ovsdb_attr(ovsdb, "Interface", port, "ofport")[0][0]
+        p2 = get_ovsdb_attr(ovsdb, "Interface", peer, "ofport")[0][0]
         return p1, p2
-
 
     if check_ovs_service():
         create(label, port)
         create(transport, peer)
         config_vport(port, peer)
-        config_vport(peer, port)
+        config_vport(peer, port, realport, vlan_id)
         if portnum is not None:
             config_portnum_instance(port)
 
@@ -164,7 +208,6 @@ def del_vport(ovsdb, label, portnum):
         if r is not None:
             raise ValueError(str(r))
 
-
     if check_ovs_service():
         if port is not None:
             remove_port(label, port)
@@ -176,12 +219,11 @@ def del_vport(ovsdb, label, portnum):
         raise ValueError("the ovsdb service is not available")
 
 
-
 PROTO = ofproto_v1_3
 PARSER = ofproto_v1_3_parser
 
 config = {
-    'prefix': None,
+    'prefix': os.environ['AGENT_PREFIX'],
     'url': os.environ['ORCH_ADDR'],
     "realm": os.environ['ORCH_REALM']
 }
@@ -221,48 +263,63 @@ def send_mod(dp, out_port, match, inst, cmd):
 
     return dp.send_msg(req)
 
-def rule_link_port(dp, in_port, out_port, vlan_id, cmd):
-    mod_cmd = cmd_supported.get(cmd, None)
 
+def rule_link_port(dp, in_port, out_port, vlan_id, cmd, by_pass=False):
+    mod_cmd = cmd_supported.get(cmd, None)
     if mod_cmd is None:
         raise ValueError("command not found")
 
     def rule_ingress():
-        actions = [
-            PARSER.OFPActionPopVlan(),
-            PARSER.OFPActionOutput(port=int(out_port))
-        ]
-        instructions = [
-            PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, actions)
-        ]
-        match = PARSER.OFPMatch(in_port=int(in_port), vlan_vid=(int(vlan_id) + 0x1000))
+        a = []
+        i = []
 
-        return send_mod(dp, int(out_port), match, instructions, mod_cmd)
+        if by_pass:
+            a.append(PARSER.OFPActionOutput(port=int(out_port)))
+            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
+            m = PARSER.OFPMatch(in_port=int(in_port), vlan_id=(0x1000 | int(vlan_id)))
+        else:
+
+            a.append(PARSER.OFPActionPopVlan())
+            a.append(PARSER.OFPActionOutput(port=int(out_port)))
+            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
+            m = PARSER.OFPMatch(in_port=int(in_port), vlan_vid=(int(vlan_id) + 0x1000))
+
+        return i, m
 
     def rule_egress():
         ethertype = 33024
+        a = []
+        i = []
 
-        actions = [
+        if by_pass:
+            a.append(PARSER.OFPActionOutput(port=int(in_port)))
+            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
+            m = PARSER.OFPMatch(in_port=int(out_port), vlan_id=(0x1000 | int(vlan_id)))
 
-            PARSER.OFPActionPushVlan(ethertype),
-            PARSER.OFPActionSetField(vlan_vid=(int(vlan_id) + 0x1000)),
-            PARSER.OFPActionOutput(port=int(in_port))
+            return i, m
 
-        ]
-        instructions = [
-            PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, actions)
-        ]
+        else:
+            a.append(PARSER.OFPActionPushVlan(ethertype))
+            a.append(PARSER.OFPActionSetField(vlan_vid=(int(vlan_id) + 0x1000)))
+            a.append(PARSER.OFPActionOutput(port=int(in_port)))
+            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
+            m = PARSER.OFPMatch(in_port=int(out_port))
 
-        match =  PARSER.OFPMatch(in_port=int(out_port))
-
-        return send_mod(dp, int(in_port), match, instructions, mod_cmd)
-
+            return i, m
 
     if dp.is_active():
-        if rule_ingress():
-            return rule_egress()
+        ii, mi = rule_ingress()
+        ing = send_mod(dp, int(out_port), mi, ii, mod_cmd)
+        if not ing:
+            raise ValueError("it is not possible to apply the rules to device")
+
+        ie, me = rule_egress()
+        egr = send_mod(dp, int(in_port), me, ie, mod_cmd)
+        if not egr:
+            raise ValueError("it is not possible to apply the rules to device")
     else:
         raise ValueError("the switch is not available")
+
 
 class VSDNAgentService(ApplicationSession):
     def __int__(self, *args, **kwargs):
@@ -270,32 +327,84 @@ class VSDNAgentService(ApplicationSession):
         self._ovsdb = kwargs.get("ovsdb")
         self._opflw = kwargs.get("opflw")
 
-    @wamp.register(uri="{p}.add_instance".format(p=config.get('prefix')))
-    def add_instance(self, label, datapath_id, protocols):
+    @wamp.register(uri="{p}.add_instance".format(p=os.environ['AGENT_PREFIX']))
+    def _add_instance(self, label, datapath_id, protocols):
         try:
             set_bridge(self._ovsdb, label, datapath_id, protocols)
             return False, None
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.rem_instance".format(p=config.get('prefix')))
-    def rem_instance(self, label):
+    @wamp.register(uri="{p}.rem_instance".format(p=os.environ['AGENT_PREFIX']))
+    def _rem_instance(self, label):
         try:
             del_bridge(self._ovsdb, label)
             return False, None
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri = "{p}.create_vport")
-    def create_vport(self, label, portnum, realport, vlan_id ):
+    @wamp.register(uri="{p}.add_vport".format(p=os.environ['AGENT_PREFIX']))
+    def _add_vport(self, label, portnum, realport, vlan_id):
         try:
-            _ , port2 = add_vport(self._ovsdb, label, portnum)
+            _, port2 = add_vport(self._ovsdb, label, portnum, realport)
             rule_link_port(self._opflw, realport, port2, vlan_id, 'add')
-        except
-            return
+            return False, None
+        except Exception as ex:
+            return True, str(ex)
 
+    @wamp.register(uri="{p}.rem_vport".format(p=os.environ['AGENT_PREFIX']))
+    def _rem_vport(self, label, portnum):
+        try:
+            _, peer = get_port(self._ovsdb, label, portnum)
+            in_port = get_peer_portnum(self._ovsdb, label, portnum)
+            out_port = get_ovsdb_attr(self._ovsdb, "Interface", peer, "external_id")[0]['realport']
+            vlan_id = get_ovsdb_attr(self._ovsdb, "Interface", peer, "external_id")[0]['vlan_id']
+            rule_link_port(self._opflw, in_port, out_port, vlan_id, "delete")
+            del_vport(self._ovsdb, label, portnum)
+            return False, None
+        except Exception as ex:
+            return True, str(ex)
+
+    @wamp.register(uri="{p}.add_by_pass".format(p=os.environ['AGENT_PREFIX']))
+    def _add_by_pass(self, in_realport, out_realport, vlan_id):
+        try:
+            rule_link_port(self._opflw, in_realport, out_realport, vlan_id, "add", True)
+            return False, None
+        except Exception as ex:
+            return True, str(ex)
+
+    @wamp.register(uri="{p}.rem_by_pass".format(p=os.environ['AGENT_PREFIX']))
+    def _rem_by_pass(self, in_realport, out_realport, vlan_id):
+        try:
+            rule_link_port(self._opflw,in_realport, out_realport, vlan_id, "delete", True)
+            return False, None
+        except Exception as ex:
+            return True, str(ex)
+
+    @wamp.register(uri="{p}.set_controller".format(p=os.environ['AGENT_PREFIX']))
+    def _set_controller(self, label, controller):
+        try:
+            set_controller(self._ovsdb, label, controller)
+            return False, None
+        except Exception as ex:
+            return True, str(ex)
+
+    @wamp.register(uri="{p}.del_controller".format(p=os.environ['AGENT_PREFIX']))
+    def _del_controller(self, label):
+        try:
+            del_controller(self._ovsdb, label)
+            return False, None
+        except Exception as ex:
+            return True, str(ex)
 
 
 class VSDNAgentController(RyuApp):
     def __init__(self, *_args, **_kwargs):
         super(VSDNAgentController, self).__init__(*_args, **_kwargs)
+
+
+
+
+
+
+
