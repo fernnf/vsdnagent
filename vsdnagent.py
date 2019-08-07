@@ -7,11 +7,15 @@ from ryu.lib.ovs.vsctl import VSCtlCommand, VSCtl
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
 from autobahn import wamp
 from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
+from ryu.topology import event as oflw_evt
+from ryu.controller.handler import set_ev_cls
+import ryu.controller.controller
+from ryu.topology.switches import dpid_to_str
 
 
-def check_ovs_service():
+def check_ovs_service(ip):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        result = sock.connect_ex(('127.0.0.1', 6640))
+        result = sock.connect_ex((ip, 6640))
         if result == 0:
             return True
         else:
@@ -28,18 +32,18 @@ def bridge_exist(ovsdb, bridge):
     return run_command(ovsdb, "br-exists", [bridge])
 
 
-def get_ovsdb_attr(ovsdb, table, record, column, key=None):
+def get_ovsdb_attr(ovsdb, table, record, column, key = None):
     if key is not None:
-        column = "{c}:{k}".format(c=column, k=key)
+        column = "{c}:{k}".format(c = column, k = key)
 
     return run_command(ovsdb, "get", [table, record, column])
 
 
-def set_ovsdb_attr(ovsdb, table, record, column, value, key=None):
+def set_ovsdb_attr(ovsdb, table, record, column, value, key = None):
     if key is not None:
-        column = "{c}:{k}".format(c=column, k=key)
+        column = "{c}:{k}".format(c = column, k = key)
 
-    ret = run_command(ovsdb, "set", [table, record, "{c}={v}".format(c=column, v=value)])
+    ret = run_command(ovsdb, "set", [table, record, "{c}={v}".format(c = column, v = value)])
     print(ret)
     if ret is not None:
         raise ValueError(str(ret))
@@ -59,7 +63,7 @@ def get_port(ovsdb, bridge, portnum):
     assert check_ovs_service(), "the ovsdb service is not available"
     ports = run_command(ovsdb, 'list-ports', [bridge])
     if len(ports) == 0:
-        raise ValueError("there is no ports on virtual bridge <{b}> ".format(b=bridge))
+        raise ValueError("there is no ports on virtual bridge <{b}> ".format(b = bridge))
     for port in ports:
         pn = get_ovsdb_attr(ovsdb, 'Interface', port, "ofport")[0][0]
         if pn == int(portnum):
@@ -75,7 +79,7 @@ def get_peer_portnum(ovsdb, bridge, portnum):
     assert check_ovs_service(), "the ovsdb service is not available"
     ports = run_command(ovsdb, 'list-ports', [bridge])
     if len(ports) == 0:
-        raise ValueError("there is no ports on virtual bridge <{b}> ".format(b=bridge))
+        raise ValueError("there is no ports on virtual bridge <{b}> ".format(b = bridge))
     for port in ports:
         pn = get_ovsdb_attr(ovsdb, 'Interface', port, "ofport")[0][0]
         if pn == int(portnum):
@@ -96,6 +100,7 @@ def set_controller(ovsdb, bridge, controller):
     if ret is not None:
         raise ValueError(str(ret))
 
+
 def del_controller(ovsdb, bridge):
     assert check_ovs_service(), "the ovsdb service is not available"
     ret = run_command(ovsdb, 'del-controller', [bridge])
@@ -103,14 +108,14 @@ def del_controller(ovsdb, bridge):
         raise ValueError(str(ret))
 
 
-def set_bridge(ovsdb, label, datapath_id=None, protocols=None):
+def set_bridge(ovsdb, label, datapath_id = None, protocols = None):
     def create():
         if not bridge_exist(ovsdb, label):
             ret = run_command(ovsdb, "add-br", [label])
             if ret is not None:
                 raise ValueError(str(ret))
         else:
-            raise ValueError("A virtual instance <{i}> with name already exists on device".format(i=label))
+            raise ValueError("A virtual instance <{i}> with name already exists on device".format(i = label))
 
     def config():
         if datapath_id is not None:
@@ -140,15 +145,15 @@ def del_bridge(ovsdb, label):
             if ret is not None:
                 raise ValueError(str(ret))
         else:
-            raise ValueError("the virtual instance <{i}> is not exist".format(i=label))
+            raise ValueError("the virtual instance <{i}> is not exist".format(i = label))
     else:
         raise ValueError("the ovsdb service is not available")
 
 
 # TODO Change the try catch to check_ovs_service
-def add_vport(ovsdb, label, portnum=None, realport=None, vlan_id=None):
-    port = "V{i}".format(i=str(uuid.uuid4())[:8])
-    peer = "R{i}".format(i=str(uuid.uuid4())[:8])
+def add_vport(ovsdb, label, portnum = None, realport = None, vlan_id = None):
+    port = "V{i}".format(i = str(uuid.uuid4())[:8])
+    peer = "R{i}".format(i = str(uuid.uuid4())[:8])
     transport = os.environ['ORCH_TRANS_BRIDGE']
 
     def create(b, p):
@@ -157,7 +162,7 @@ def add_vport(ovsdb, label, portnum=None, realport=None, vlan_id=None):
             if ret is not None:
                 raise ValueError(str(ret))
 
-    def config_vport(v, p, r=None, vl=None):
+    def config_vport(v, p, r = None, vl = None):
         ph = set_ovsdb_attr(ovsdb, "Interface", v, "type", "patch")
         if ph is None:
             pr = set_ovsdb_attr(ovsdb, "Interface", v, "options", p, "peer")
@@ -214,7 +219,7 @@ def del_vport(ovsdb, label, portnum):
             if peer is not None:
                 remove_port(transport, peer)
         else:
-            raise ValueError("the port <{p}> is not attached to instance <{i}>".format(p=port, i=label))
+            raise ValueError("the port <{p}> is not attached to instance <{i}>".format(p = port, i = label))
     else:
         raise ValueError("the ovsdb service is not available")
 
@@ -246,25 +251,25 @@ def send_mod(dp, out_port, match, inst, cmd):
     out_group = PROTO.OFPG_ANY
     flags = 0
 
-    req = PARSER.OFPFlowMod(datapath=dp,
-                            cookie=cookie,
-                            cookie_mask=cookie_mask,
-                            table_id=table_id,
-                            command=cmd,
-                            idle_timeout=idle_timeout,
-                            hard_timeout=hard_timeout,
-                            priority=priority,
-                            buffer_id=buffer_id,
-                            out_port=out_port,
-                            out_group=out_group,
-                            flags=flags,
-                            match=match,
-                            instructions=inst)
+    req = PARSER.OFPFlowMod(datapath = dp,
+                            cookie = cookie,
+                            cookie_mask = cookie_mask,
+                            table_id = table_id,
+                            command = cmd,
+                            idle_timeout = idle_timeout,
+                            hard_timeout = hard_timeout,
+                            priority = priority,
+                            buffer_id = buffer_id,
+                            out_port = out_port,
+                            out_group = out_group,
+                            flags = flags,
+                            match = match,
+                            instructions = inst)
 
     return dp.send_msg(req)
 
 
-def rule_link_port(dp, in_port, out_port, vlan_id, cmd, by_pass=False):
+def rule_link_port(dp, in_port, out_port, vlan_id, cmd, by_pass = False):
     mod_cmd = cmd_supported.get(cmd, None)
     if mod_cmd is None:
         raise ValueError("command not found")
@@ -274,15 +279,15 @@ def rule_link_port(dp, in_port, out_port, vlan_id, cmd, by_pass=False):
         i = []
 
         if by_pass:
-            a.append(PARSER.OFPActionOutput(port=int(out_port)))
+            a.append(PARSER.OFPActionOutput(port = int(out_port)))
             i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port=int(in_port), vlan_id=(0x1000 | int(vlan_id)))
+            m = PARSER.OFPMatch(in_port = int(in_port), vlan_id = (0x1000 | int(vlan_id)))
         else:
 
             a.append(PARSER.OFPActionPopVlan())
-            a.append(PARSER.OFPActionOutput(port=int(out_port)))
+            a.append(PARSER.OFPActionOutput(port = int(out_port)))
             i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port=int(in_port), vlan_vid=(int(vlan_id) + 0x1000))
+            m = PARSER.OFPMatch(in_port = int(in_port), vlan_vid = (int(vlan_id) + 0x1000))
 
         return i, m
 
@@ -292,18 +297,18 @@ def rule_link_port(dp, in_port, out_port, vlan_id, cmd, by_pass=False):
         i = []
 
         if by_pass:
-            a.append(PARSER.OFPActionOutput(port=int(in_port)))
+            a.append(PARSER.OFPActionOutput(port = int(in_port)))
             i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port=int(out_port), vlan_id=(0x1000 | int(vlan_id)))
+            m = PARSER.OFPMatch(in_port = int(out_port), vlan_id = (0x1000 | int(vlan_id)))
 
             return i, m
 
         else:
             a.append(PARSER.OFPActionPushVlan(ethertype))
-            a.append(PARSER.OFPActionSetField(vlan_vid=(int(vlan_id) + 0x1000)))
-            a.append(PARSER.OFPActionOutput(port=int(in_port)))
+            a.append(PARSER.OFPActionSetField(vlan_vid = (int(vlan_id) + 0x1000)))
+            a.append(PARSER.OFPActionOutput(port = int(in_port)))
             i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port=int(out_port))
+            m = PARSER.OFPMatch(in_port = int(out_port))
 
             return i, m
 
@@ -327,7 +332,7 @@ class VSDNAgentService(ApplicationSession):
         self._ovsdb = kwargs.get("ovsdb")
         self._opflw = kwargs.get("opflw")
 
-    @wamp.register(uri="{p}.add_instance".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.add_instance".format(p = os.environ['AGENT_PREFIX']))
     def _add_instance(self, label, datapath_id, protocols):
         try:
             set_bridge(self._ovsdb, label, datapath_id, protocols)
@@ -335,7 +340,7 @@ class VSDNAgentService(ApplicationSession):
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.rem_instance".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.rem_instance".format(p = os.environ['AGENT_PREFIX']))
     def _rem_instance(self, label):
         try:
             del_bridge(self._ovsdb, label)
@@ -343,7 +348,7 @@ class VSDNAgentService(ApplicationSession):
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.add_vport".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.add_vport".format(p = os.environ['AGENT_PREFIX']))
     def _add_vport(self, label, portnum, realport, vlan_id):
         try:
             _, port2 = add_vport(self._ovsdb, label, portnum, realport)
@@ -352,7 +357,7 @@ class VSDNAgentService(ApplicationSession):
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.rem_vport".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.rem_vport".format(p = os.environ['AGENT_PREFIX']))
     def _rem_vport(self, label, portnum):
         try:
             _, peer = get_port(self._ovsdb, label, portnum)
@@ -365,7 +370,7 @@ class VSDNAgentService(ApplicationSession):
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.add_by_pass".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.add_by_pass".format(p = os.environ['AGENT_PREFIX']))
     def _add_by_pass(self, in_realport, out_realport, vlan_id):
         try:
             rule_link_port(self._opflw, in_realport, out_realport, vlan_id, "add", True)
@@ -373,15 +378,15 @@ class VSDNAgentService(ApplicationSession):
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.rem_by_pass".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.rem_by_pass".format(p = os.environ['AGENT_PREFIX']))
     def _rem_by_pass(self, in_realport, out_realport, vlan_id):
         try:
-            rule_link_port(self._opflw,in_realport, out_realport, vlan_id, "delete", True)
+            rule_link_port(self._opflw, in_realport, out_realport, vlan_id, "delete", True)
             return False, None
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.set_controller".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.set_controller".format(p = os.environ['AGENT_PREFIX']))
     def _set_controller(self, label, controller):
         try:
             set_controller(self._ovsdb, label, controller)
@@ -389,7 +394,7 @@ class VSDNAgentService(ApplicationSession):
         except Exception as ex:
             return True, str(ex)
 
-    @wamp.register(uri="{p}.del_controller".format(p=os.environ['AGENT_PREFIX']))
+    @wamp.register(uri = "{p}.del_controller".format(p = os.environ['AGENT_PREFIX']))
     def _del_controller(self, label):
         try:
             del_controller(self._ovsdb, label)
@@ -401,11 +406,39 @@ class VSDNAgentService(ApplicationSession):
 class VSDNAgentController(RyuApp):
     def __init__(self, *_args, **_kwargs):
         super(VSDNAgentController, self).__init__(*_args, **_kwargs)
+        self._ovsdb = None
+        self._datapath = None
 
+    def _set_prefix(self, dpid):
+        os.environ['AGENT_PREFIX'] = "agent.{id}".format(id=dpid)
 
+    def _get_prefix(self):
+        return os.environ['AGENT_PREFIX']
 
+    def _set_datapath(self, dp):
+        self._datapath = dp
 
+    def _get_datapath(self):
+        return self._datapath
 
+    def _set_ovsdb(self, db_addr):
+        self._ovsdb = VSCtl(db_addr)
 
+    def _get_ovsdb(self):
+        return self._ovsdb
+
+    @set_ev_cls(oflw_evt.EventSwitchEnter)
+    def _switch_enter(self, ev):
+        self._set_datapath(ev.switch.dp)
+        self._set_prefix(dpid_to_str(self._get_datapath().id))
+        db_address, _ = self._get_datapath().address
+
+        self.logger.info("new switch <{i}> has attached to agent <{a}>".format(i=dpid_to_str(self._get_datapath().id),
+                                                                               a=self._get_prefix()))
+        if check_ovs_service(db_address):
+            self.logger.info("the ovsdb service has reached by agent")
+            self._set_ovsdb(db_addr = "tcp:{a}:6640".format(a=db_address))
+        else:
+            self.logger.error("ovsdb service not was reached in tcp:{a}:6640 , enable it 'set-manager ptcp:6640'".format(a=db_address))
 
 
