@@ -337,11 +337,10 @@ class VSDNAgentService(ApplicationSession):
 
     @inlineCallbacks
     def register_device(self):
-        msg = {"datapath_id": dpid_to_str(self._opflw.id),
-               "prefix_uri": os.environ['AGENT_PREFIX'],
-               "label": "of:device:{i}".format(i=dpid_to_str(self._opflw.id))}
-
-        yield self.publish("topologyservice.new_device", msg)
+        yield self.publish("topologyservice.new_device",
+                           datapath_id=dpid_to_str(self._opflw.id),
+                           prefix_uri=os.environ['AGENT_PREFIX'],
+                           label="of:device:{i}".format(i=dpid_to_str(self._opflw.id)))
 
     @inlineCallbacks
     def register_procedures(self):
