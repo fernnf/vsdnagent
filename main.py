@@ -2,12 +2,21 @@ import logging
 import sys
 import os
 import coloredlogs as coloredlogs
+import argparse
 from ryu.cmd import manager
+import subprocess
 
 logger = logging.getLogger("vsdnagent")
 
 
-def main():
+def ryu_cmd(port):
+    listen_port = "--ofp-tcp-listen-port"
+    agent_app = "vsdnagent.py"
+    cmd = ["ryu-manager", listen_port, port, agent_app]
+    subprocess.call(cmd)
+
+
+def main(port):
     if 'ORCH_ADDR' is not os.environ:
         os.environ['ORCH_ADDR'] = "ws://127.0.0.1:8080/ws"
 
@@ -23,15 +32,20 @@ def main():
     if 'OVS_ADDR' is not os.environ:
         os.environ['OVS_ADDR'] = "tcp:127.0.0.1:6640"
 
-    sys.argv.append('--ofp-tcp-listen-port')
-    sys.argv.append('6653')
-    sys.argv.append('vsdnagent')
-    #sys.argv.append('--verbose')
-    # sys.argv.append('--enable-debugger')
-    manager.main()
+    ryu_cmd(port)
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("port", type=str)
+    args = parser.parse_args()
     coloredlogs.install(logger=logger)
     logger.info("Starting vSDNAgent")
+
+    if args.port is None:
+        parser.print_help()
+    else:
+        try:
+            main(args.port)
+        except KeyboardInterrupt as ex:
+            print("Exiting...")
