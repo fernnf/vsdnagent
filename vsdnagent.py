@@ -348,6 +348,7 @@ class VSDNAgentService(ApplicationSession):
         def _add_instance(label, datapath_id, protocols):
             try:
                 set_bridge(self._ovsdb, label, datapath_id, protocols)
+
                 return False, None
             except Exception as ex:
                 return True, str(ex)
