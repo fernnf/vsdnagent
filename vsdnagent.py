@@ -153,6 +153,7 @@ def del_bridge(ovsdb, label):
 
 # TODO Change the try catch to check_ovs_service
 def add_vport(ovsdb, label, portnum=None, realport=None, vlan_id=None):
+    print(label)
     port = "V{i}".format(i=str(uuid.uuid4())[:8])
     peer = "R{i}".format(i=str(uuid.uuid4())[:8])
     transport = os.environ['ORCH_TRANS_BRIDGE']
