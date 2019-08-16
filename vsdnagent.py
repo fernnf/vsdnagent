@@ -1,225 +1,149 @@
-import socket
+import multiprocessing as mp
 import os
-import uuid
-import threading
 import signal
-import socket
 
-from ryu.base.app_manager import RyuApp
-from ryu.lib.ovs.vsctl import VSCtlCommand, VSCtl
+import coloredlogs
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner, inlineCallbacks
-from autobahn import wamp
-from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
-from ryu.topology import event as oflw_evt
+from autobahn.wamp.exception import ApplicationError
+from ryu.base.app_manager import RyuApp
 from ryu.controller.handler import set_ev_cls
+from ryu.topology import event as oflw_evt
 from ryu.topology.switches import dpid_to_str
 
+from openflow import OFLWController
+from ovsdb import OVSController, check_ovs_service
 
 
-PROTO = ofproto_v1_3
-PARSER = ofproto_v1_3_parser
-
-config = {
-    'prefix': os.environ['AGENT_PREFIX'],
-    'url': os.environ['ORCH_ADDR'],
-    "realm": os.environ['ORCH_REALM']
-}
-
-cmd_supported = {
-    "add": PROTO.OFPFC_ADD,
-    "modify": PROTO.OFPFC_MODIFY,
-    "modify_strict": PROTO.OFPFC_MODIFY_STRICT,
-    "delete": PROTO.OFPFC_DELETE,
-    "delete_strict": PROTO.OFPFC_DELETE_STRICT
-}
-
-
-def send_mod(dp, out_port, match, inst, cmd):
-    cookie = cookie_mask = 0
-    table_id = 0
-    idle_timeout = hard_timeout = 0
-    priority = 0
-    buffer_id = PROTO.OFP_NO_BUFFER
-    out_group = PROTO.OFPG_ANY
-    flags = 0
-
-    req = PARSER.OFPFlowMod(datapath = dp,
-                            cookie = cookie,
-                            cookie_mask = cookie_mask,
-                            table_id = table_id,
-                            command = cmd,
-                            idle_timeout = idle_timeout,
-                            hard_timeout = hard_timeout,
-                            priority = priority,
-                            buffer_id = buffer_id,
-                            out_port = out_port,
-                            out_group = out_group,
-                            flags = flags,
-                            match = match,
-                            instructions = inst)
-
-    return dp.send_msg(req)
-
-
-def rule_link_port(dp, in_port, out_port, vlan_id, cmd, by_pass = False):
-    mod_cmd = cmd_supported.get(cmd, None)
-    if mod_cmd is None:
-        raise ValueError("command not found")
-
-    def rule_ingress():
-        a = []
-        i = []
-
-        if by_pass:
-            a.append(PARSER.OFPActionOutput(port = int(out_port)))
-            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port = int(in_port), vlan_id = (0x1000 | int(vlan_id)))
-        else:
-
-            a.append(PARSER.OFPActionPopVlan())
-            a.append(PARSER.OFPActionOutput(port = int(out_port)))
-            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port = int(in_port), vlan_vid = (int(vlan_id) + 0x1000))
-
-        return i, m
-
-    def rule_egress():
-        ethertype = 33024
-        a = []
-        i = []
-
-        if by_pass:
-            a.append(PARSER.OFPActionOutput(port = int(in_port)))
-            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port = int(out_port), vlan_id = (0x1000 | int(vlan_id)))
-
-            return i, m
-
-        else:
-            a.append(PARSER.OFPActionPushVlan(ethertype))
-            a.append(PARSER.OFPActionSetField(vlan_vid = (int(vlan_id) + 0x1000)))
-            a.append(PARSER.OFPActionOutput(port = int(in_port)))
-            i.append(PARSER.OFPInstructionActions(PROTO.OFPIT_APPLY_ACTIONS, a))
-            m = PARSER.OFPMatch(in_port = int(out_port))
-
-            return i, m
-
-    if dp.is_active():
-        ii, mi = rule_ingress()
-        ing = send_mod(dp, int(out_port), mi, ii, mod_cmd)
-        if not ing:
-            raise ValueError("it is not possible to apply the rules to device")
-
-        ie, me = rule_egress()
-        egr = send_mod(dp, int(in_port), me, ie, mod_cmd)
-        if not egr:
-            raise ValueError("it is not possible to apply the rules to device")
-    else:
-        raise ValueError("the switch is not available")
+def get_procedure(name, prefix=None):
+    if prefix is None:
+        prefix = os.environ['AGENT_PREFIX']
+    return "{p}.{n}".format(p=prefix, n=name)
 
 
 class VSDNAgentService(ApplicationSession):
 
-    def set_ovsdb(self, db):
-        self._ovsdb = db
+    def __init__(self, ovs: OVSController, oflw: OFLWController, config=None):
+        super().__init__(config=None)
+        self._oflw = oflw
+        self._ovs = ovs
 
-    def set_opflw(self, dp):
-        self._opflw = dp
+    def _add_vswitch(self, name, datapath_id, protocols):
+        try:
+            self._ovs.set_bridge(name, datapath_id, protocols)
+            dpid = self._ovs.get_dpid(name)
+            self.log.info("new virtual switch {} has created with dpid {}".format(name, dpid))
+        except Exception as ex:
+            error = '{p}.error.add_switch'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _rem_vswitch(self, name):
+        try:
+            self._ovs.del_bridge(name)
+            self.log.info("<i> virtual switch has removed".format(i=name))
+        except Exception as ex:
+            error = '{p}.error.rem_switch'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _add_vport(self, vswitch, vlan_id, source_portnum, phy_portnum):
+
+        def register_phy():
+            port = self._ovs.get_port(vswitch, source_portnum)
+            self._ovs.set_ovsdb_attr('Interface', port, 'external_ids', phy_portnum, 'phy_portnum')
+            self.log.info("register phy interface {}".format(phy_portnum))
+
+        def add_vport():
+            bridge_source = vswitch
+            bridge_target = os.environ['ORCH_TRANS_BRIDGE']
+            self._ovs.add_patch_port(bridge_source, bridge_target, source_portnum)
+            self.log.info("added vport {} on patch {}:{}".format(phy_portnum, bridge_source, bridge_target))
+
+        def add_rules():
+            portnum_peer = self._ovs.get_peer_portnum(vswitch, source_portnum)
+            self._oflw.rule_link_port(portnum_peer, phy_portnum, vlan_id, 'add', by_pass=False)
+            self.log.info('set rules openflow')
+
+        try:
+            add_vport()
+            #add_rules()
+            register_phy()
+        except Exception as ex:
+            error = '{p}.error.add_vport'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _rem_vport(self, vswitch, vlan_id, portnum):
+
+        def get_phy_portnum():
+            port = self._ovs.get_port(vswitch, portnum)
+            pp = self._ovs.get_ovsdb_attr('Interface', port, 'external_ids', 'phy_portnum')
+            return pp
+
+        try:
+            self._ovs.rem_patch_port(vswitch, portnum)
+            peer_portnum = self._ovs.get_peer_portnum(vswitch, portnum)
+            phy_portnum = get_phy_portnum()
+            self._oflw.rule_link_port(peer_portnum, phy_portnum, vlan_id, 'delete')
+
+        except Exception as ex:
+            error = '{p}.error.rem_vport'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _add_by_pass(self, phyport_in, phyport_out, vlan_id):
+        try:
+            self._oflw.rule_link_port(phyport_in, phyport_out, vlan_id, 'add', by_pass=True)
+        except Exception as ex:
+            error = '{p}.error.add_bypass'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _rem_by_pass(self, phyport_in, phyport_out, vlan_id):
+        try:
+            self._oflw.rule_link_port(phyport_in, phyport_out, vlan_id, 'delete', by_pass=True)
+        except Exception as ex:
+            error = '{p}.error.rem_bypass'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _set_controller(self, vswitch, controller):
+        try:
+            self._ovs.set_controller(vswitch, controller)
+        except Exception as ex:
+            error = '{p}.error.set_controller'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def _del_controller(self, vswitch):
+        try:
+            self._ovs.del_controller(vswitch)
+        except Exception as ex:
+            error = '{p}.error.rem_controller'.format(p=os.environ['AGENT_PREFIX'])
+            raise ApplicationError(error, msg=str(ex))
+
+    def onUserError(self, fail, msg):
+        print("{} : {}".format(fail, msg))
 
     @inlineCallbacks
-    def register_device(self):
-        yield self.publish("topologyservice.new_device",
-                           datapath_id = dpid_to_str(self._opflw.id),
-                           prefix_uri = os.environ['AGENT_PREFIX'],
-                           label = "of:device:{i}".format(i = dpid_to_str(self._opflw.id)))
-
-    @inlineCallbacks
-    def register_procedures(self):
-
-        def _add_vswitch(label, datapath_id, protocols):
-            try:
-                set_bridge(self._ovsdb, label, datapath_id, protocols)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _rem_vswitch(label):
-            try:
-                del_bridge(self._ovsdb, label)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _add_vport(label, portnum, realport, vlan_id):
-            try:
-                _, port2 = add_vport(self._ovsdb, label, portnum, realport)
-                rule_link_port(self._opflw, realport, port2, vlan_id, 'add')
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _rem_vport(label, portnum):
-            try:
-                _, peer = get_port(self._ovsdb, label, portnum)
-                in_port = get_peer_portnum(self._ovsdb, label, portnum)
-                out_port = get_ovsdb_attr(self._ovsdb, "Interface", peer, "external_id")[0]['realport']
-                vlan_id = get_ovsdb_attr(self._ovsdb, "Interface", peer, "external_id")[0]['vlan_id']
-                rule_link_port(self._opflw, in_port, out_port, vlan_id, "delete")
-                del_vport(self._ovsdb, label, portnum)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _add_by_pass(in_realport, out_realport, vlan_id):
-            try:
-                rule_link_port(self._opflw, in_realport, out_realport, vlan_id, "add", True)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _rem_by_pass(in_realport, out_realport, vlan_id):
-            try:
-                rule_link_port(self._opflw, in_realport, out_realport, vlan_id, "delete", True)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _set_controller(label, controller):
-            try:
-                set_controller(self._ovsdb, label, controller)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        def _del_controller(label):
-            try:
-                del_controller(self._ovsdb, label)
-                return False, None
-            except Exception as ex:
-                return True, str(ex)
-
-        yield self.register(_add_vswitch, '{p}.add_vswitch'.format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_rem_vswitch, '{p}.rem_vswitch'.format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_add_vport, "{p}.add_vport".format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_rem_vport, "{p}.rem_vport".format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_add_by_pass, "{p}.add_by_pass".format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_rem_by_pass, "{p}.rem_by_pass".format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_set_controller, "{p}.set_controller".format(p = os.environ['AGENT_PREFIX']))
-        yield self.register(_del_controller, "{p}.del_controller".format(p = os.environ['AGENT_PREFIX']))
-
-        self.log.info("8 procedures has registred")
-
     def onJoin(self, details):
-        self.log.info("vSDNOrches orchestrator was reached")
-        self.log.info("Prefix agent: {p}".format(p = os.environ['AGENT_PREFIX']))
-        self.register_procedures()
-        self.register_device()
+        self.log.info("Starting vSDNAgentService")
+        self.log.info("Prefix agent: {p}".format(p=os.environ['AGENT_PREFIX']))
+
+        yield self.register(self._add_vswitch, get_procedure('add_vswitch'))
+        yield self.register(self._rem_vswitch, get_procedure('rem_vswitch'))
+        yield self.register(self._add_vport, get_procedure('add_vport'))
+        yield self.register(self._rem_vport, get_procedure('rem_vport'))
+        yield self.register(self._add_by_pass, get_procedure('add_bypass'))
+        yield self.register(self._rem_by_pass, get_procedure('rem_bypass'))
+        yield self.register(self._set_controller, get_procedure('add_controller'))
+        yield self.register(self._del_controller, get_procedure('rem_controller'))
+
+        yield self.publish("topologyservice.new_device",
+                           datapath_id=self._oflw.get_dpid(),
+                           prefix_uri=os.environ['AGENT_PREFIX'],
+                           label=self._oflw.get_dpid())
+
+        self.log.info("Started vSDNAgentService")
 
         @inlineCallbacks
         def unregister_device(sig, frame):
             msg = {"datapath_id": dpid_to_str(self._opflw.id),
                    "prefix_uri": os.environ['AGENT_PREFIX'],
-                   "label": "of:device:{i}".format(i = dpid_to_str(self._opflw.id))}
+                   "label": "of:device:{i}".format(i=dpid_to_str(self._opflw.id))}
 
             yield self.publish("topologyservice.rem_device", msg)
             yield self.leave()
@@ -233,60 +157,52 @@ class VSDNAgentService(ApplicationSession):
 class VSDNAgentController(RyuApp):
     def __init__(self, *_args, **_kwargs):
         super(VSDNAgentController, self).__init__(*_args, **_kwargs)
+        coloredlogs.install(logger=self.logger)
         self._ovsdb = None
         self._datapath = None
 
-    def _set_prefix(self, dpid):
-        os.environ['AGENT_PREFIX'] = "agent.{id}".format(id = dpid)
+    def set_prefix(self, dpid):
+        os.environ['AGENT_PREFIX'] = "agent.{id}".format(id=dpid)
 
-    def _get_prefix(self):
+    def get_prefix(self):
         return os.environ['AGENT_PREFIX']
 
-    def _set_datapath(self, dp):
-        self._datapath = dp
+    def set_datapath(self, dp):
+        self._datapath = OFLWController(dp)
 
-    def _get_datapath(self):
+    def get_datapath(self):
         return self._datapath
 
-    def _set_ovsdb(self, db_addr):
-        self._ovsdb = VSCtl(db_addr)
+    def set_ovsdb(self, addr, port):
+        self._ovsdb = OVSController(addr, port)
 
-    def _get_ovsdb(self):
+    def get_ovsdb(self):
         return self._ovsdb
 
     def _start_wamp(self):
         try:
-            app = VSDNAgentService()
-            app.set_opflw(self._datapath)
-            app.set_ovsdb(self._ovsdb)
-            runner = ApplicationRunner(url = os.environ["ORCH_ADDR"], realm = os.environ["ORCH_REALM"])
-            runner.run(app, auto_reconnect = True)
+            app = VSDNAgentService(ovs=self.get_ovsdb(), oflw=self.get_datapath())
+            runner = ApplicationRunner(url=os.environ["ORCH_ADDR"], realm=os.environ["ORCH_REALM"])
+            runner.run(app, auto_reconnect=True)
         except Exception as ex:
             self.logger.error(str(ex))
-            self.logger.error("vSDNOrches Orchestrator not found, retry...")
 
     @set_ev_cls(oflw_evt.EventSwitchEnter)
     def _switch_enter(self, ev):
-        self._set_datapath(ev.switch.dp)
-        self._set_prefix(dpid_to_str(self._get_datapath().id))
-        db_address, _ = self._get_datapath().address
+        self.set_datapath(ev.switch.dp)
+        self.set_prefix(self.get_datapath().get_dpid())
+        db_address, _ = self.get_datapath().dp.address
 
-        self.logger.info("new switch <{i}> has attached to agent <{a}>".format(i = dpid_to_str(self._get_datapath().id),
-                                                                               a = self._get_prefix()))
+        self.logger.info("new switch <{i}> has attached to agent <{a}>".format(i=self.get_datapath().get_dpid(),
+                                                                               a=self.get_prefix()))
 
-        if check_ovs_service():
-            self.logger.info("the ovsdb service has reached by agent")
-            self._set_ovsdb(db_addr = "tcp:{a}:6640".format(a = db_address))
+        if check_ovs_service(db_address, port='6640'):
+            self.logger.info("the ovsdb service has reached out")
+            self.set_ovsdb(db_address, "6640")
         else:
             self.logger.error(
-                "ovsdb service not was reached in tcp:{a}:6640 , enable it 'set-manager ptcp:6640'".format(
-                    a = db_address))
+                "enable ovsdb manager in {a} with 'set-manager ptcp:6640'".format(a=db_address))
 
-        t = threading.Thread(target = self._start_wamp)
-        t.start()
-
-
-if __name__ == '__main__':
-    db = VSCtl('tcp:192.168.0.5:6640')
-    ret = bridge_exist(db, 'vswitch1')
-    print(ret)
+        mp.set_start_method('spawn')
+        self._process = mp.Process(target=self._start_wamp())
+        self._process.start()
