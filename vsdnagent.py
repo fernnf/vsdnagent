@@ -64,7 +64,7 @@ class VSDNAgentService(ApplicationSession):
 
         try:
             add_vport()
-            #add_rules()
+            add_rules()
             register_phy()
         except Exception as ex:
             error = '{p}.error.add_vport'.format(p=os.environ['AGENT_PREFIX'])

@@ -108,7 +108,7 @@ class OFLWController(object):
             if not egr:
                 raise ValueError("error to apply egress rules")
 
-        if self.dp.is_active():
+        if self.dp.is_active:
             apply_rules_ingress()
             apply_rules_egress()
         else:
