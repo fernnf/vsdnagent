@@ -11,10 +11,9 @@ logger = logging.getLogger("vsdnagent")
 
 def ryu_cmd(port):
     listen_port = "--ofp-tcp-listen-port"
-    agent_app = "vsdnagent.py"
+    agent_app = "/code/vsdnagent/vsdnagent.py"
     cmd = ["ryu-manager", listen_port, port, agent_app]
     subprocess.call(cmd)
-
 
 def main(port):
     if 'ORCH_ADDR' is not os.environ:
