@@ -10,8 +10,8 @@ from ryu.controller.handler import set_ev_cls
 from ryu.topology import event as oflw_evt
 from ryu.topology.switches import dpid_to_str
 
-from openflow import OFLWController
-from ovsdb import OVSController, check_ovs_service
+from vsdnagent.openflow import OFLWController
+from vsdnagent.ovsdb import OVSController, check_ovs_service
 
 
 def get_procedure(name, prefix=None):

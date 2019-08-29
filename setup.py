@@ -17,5 +17,5 @@ setup(
     ],
     include_package_data=True,
     install_requires=['ryu', 'coloredlogs', 'autobahn', 'Twisted'],
-    zip_safe=True
+    zip_safe=False
 )
