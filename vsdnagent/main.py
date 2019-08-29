@@ -1,10 +1,9 @@
-import logging
-import sys
-import os
-import coloredlogs as coloredlogs
 import argparse
-from ryu.cmd import manager
+import logging
+import os
 import subprocess
+
+import coloredlogs as coloredlogs
 
 logger = logging.getLogger("vsdnagent")
 
@@ -14,6 +13,7 @@ def ryu_cmd(port):
     agent_app = "/code/vsdnagent/vsdnagent.py"
     cmd = ["ryu-manager", listen_port, port, agent_app]
     subprocess.call(cmd)
+
 
 def main(port):
     if 'ORCH_ADDR' is not os.environ:
