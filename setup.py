@@ -8,13 +8,14 @@ setup(
     license='APACHE 2',
     author='Fernando Farias',
     author_email='fernnf@gmail.com',
-    description='',
+    description='vSDNAgent',
     classifiers=[
         'Development Status :: 0.2 - Release',
         'License :: OSI Approved :: APACHE2 License',
         'Programming Language :: Python :: 3.6',
-        'Topic :: SDN Develop :: Network Emulator',
+        'Topic :: SDN Develop :: Agent Framework',
     ],
-    include_package_data = True,
-    zip_safe = False
+    include_package_data=True,
+    install_requires=['ryu', 'coloredlogs', 'autobahn', 'Twisted'],
+    zip_safe=True
 )
