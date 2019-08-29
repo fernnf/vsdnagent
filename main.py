@@ -3,8 +3,6 @@ import logging
 import os
 import subprocess
 
-from vsdnagent import vsdnagent
-
 import coloredlogs as coloredlogs
 
 logger = logging.getLogger("vsdnagent")
@@ -12,8 +10,8 @@ logger = logging.getLogger("vsdnagent")
 
 def ryu_cmd(port):
     listen_port = "--ofp-tcp-listen-port"
-    #agent_app = "/code/vsdnagent/vsdnagent/vsdnagent.py"
-    cmd = ["ryu-manager", listen_port, port, vsdnagent]
+    agent_app = "./vsdnagent.py"
+    cmd = ["ryu-manager", listen_port, port, agent_app]
     subprocess.call(cmd)
 
 
