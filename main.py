@@ -17,6 +17,7 @@ def ryu_cmd(port):
 
 def main(port):
 
+
     if 'ORCH_REALM' is not os.environ:
         os.environ['ORCH_REALM'] = 'realm1'
 
