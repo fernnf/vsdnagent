@@ -16,8 +16,6 @@ def ryu_cmd(port):
 
 
 def main(port):
-    if 'ORCH_ADDR' is not os.environ:
-        os.environ['ORCH_ADDR'] = "ws://127.0.0.1:8080/ws"
 
     if 'ORCH_REALM' is not os.environ:
         os.environ['ORCH_REALM'] = 'realm1'
