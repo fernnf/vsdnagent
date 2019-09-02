@@ -182,7 +182,10 @@ class VSDNAgentController(RyuApp):
     def _start_wamp(self):
         try:
             app = VSDNAgentService(ovs=self.get_ovsdb(), oflw=self.get_datapath())
-            runner = ApplicationRunner(url=os.environ["ORCH_ADDR"], realm=os.environ["ORCH_REALM"])
+            url = os.environ["ORCH_ADDR"]
+            realm = os.environ["ORCH_REALM"]
+            self.logger.info("Connecting to Ochestrator url:{} realm:{}".format(url, realm))
+            runner = ApplicationRunner(url=url, realm=realm)
             runner.run(app, auto_reconnect=True)
         except Exception as ex:
             self.logger.error(str(ex))
